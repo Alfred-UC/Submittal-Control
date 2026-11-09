@@ -163,7 +163,10 @@ a { color: var(--brand-text); text-underline-offset: 2px; }
 .fchip[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--surface); }
 .fchip[aria-pressed="true"] .n { color: var(--surface); opacity: .7; }
 .fchip[disabled] { opacity: .45; cursor: default; }
-.fchips.cofilter { margin: 0; }
+.filters { display: grid; gap: 8px; }
+.frow { display: grid; grid-template-columns: 64px minmax(0, 1fr); align-items: start; gap: 10px; }
+.frow .flabel { font-stretch: 80%; font-size: 13px; color: var(--ink-2); letter-spacing: .015em; padding-top: 6px; }
+.frow .fchips { margin: 0; }
 .cdot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; background: var(--co, var(--ink-3)); flex: none; }
 .cdot.uc { --co: var(--co-uc); } .cdot.asf { --co: var(--co-asf); }
 .gdot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; flex: none; background: var(--gc, var(--ink-3)); }
@@ -479,7 +482,8 @@ details summary { cursor: pointer; font-weight: 700; }
 var CONFIG = { mode: 'live' };   // the preview copy has mode 'preview' and the workbook's data in SEED
 var SEED = null;
 var PREVIEW = CONFIG.mode === 'preview' && !!SEED;
-var SCHEMA = { app: 'submittal-control', version: '1.0.0' };
+var SCHEMA = { app: 'submittal-control', version: '1.1.0' };
+var PM_SINCE = '1.1.0';   // the first script version that keeps a PM
 var KEYS = { conn: 'sc.conn.v1', cache: 'sc.cache.v1', outbox: 'sc.outbox.v1', ui: 'sc.ui.v1', me: 'sc.me.v1', preview: 'sc.preview.v1' };
 var STATUS = ['Active', 'On Hold', 'Closed'];
 var COMPANIES = [
@@ -606,7 +610,7 @@ function normData(raw) {
   var nv = function (v) { return typeof v === 'number' && isFinite(v) ? v : str(v).trim(); };
   return {
     projects: (raw.projects || []).map(function (p) {
-      return { id: str(p.id), name: str(p.name), number: str(p.number), gc: str(p.gc), estimator: str(p.estimator), status: normStatus(p.status),
+      return { id: str(p.id), name: str(p.name), number: str(p.number), gc: str(p.gc), estimator: str(p.estimator), pm: str(p.pm).trim(), status: normStatus(p.status),
         company: str(p.company).trim(), notes: str(p.notes), _row: +p._row || 0 };
     }),
     submittals: (raw.submittals || []).map(function (s) {
@@ -724,7 +728,7 @@ var state = {
   sync: { state: 'idle', msg: '' }, pendingConn: null,
   route: { view: 'projects', pid: '', tab: 'log' },
   ui: Object.assign({ sort: 'num', attn: 'overdue', showClosed: false }, store.get(KEYS.ui) || {},
-    { coFilter: null, pSearch: '', q: '', f: '', af: '', attnAll: false }),
+    { coFilter: null, pmFilter: null, pSearch: '', q: '', f: '', af: '', attnAll: false }),
   me: str(store.get(KEYS.me))
 };
 function saveUi() { store.set(KEYS.ui, { sort: state.ui.sort, attn: state.ui.attn, showClosed: state.ui.showClosed }); }
@@ -940,6 +944,7 @@ function renderPlates(p) {
   if (p.number) h += '<span class="plate"><span class="k">Project No.</span> <span class="v">' + esc(p.number) + '</span></span> ';
   if (p.gc) h += '<span class="plate" title="General contractor, or whoever the submittals go to"><span class="k">GC</span> <span class="v">' + esc(p.gc) + '</span></span> ';
   if (p.estimator) h += '<span class="plate"><span class="k">Estimator</span> <span class="v">' + esc(p.estimator) + '</span></span>';
+  if (p.pm) h += '<span class="plate"><span class="k">PM</span> <span class="v">' + esc(p.pm) + '</span></span>';
   el.innerHTML = h;
 }
 function renderSync() {
@@ -1103,29 +1108,50 @@ function coGroups(list) {
   g.keys.sort(function (a, b) { return rank(a) - rank(b) || a.localeCompare(b); });
   return g;
 }
-function coChips(g, total) {
-  var f = state.ui.coFilter;
-  var chip = function (k, label, n, title) {
-    var on = k === null ? f === null : f === k, co = k ? companyByKey(k) : null;
-    return '<button type="button" class="fchip" data-action="co-filter" data-co="' + (k === null ? '*' : esc(k)) + '" aria-pressed="' + on + '"' +
-      (title ? ' title="' + esc(title) + '"' : '') + '>' + (k === null ? '' : '<i class="cdot' + (co ? ' ' + co.key : '') + '"></i>') + esc(label) + ' <span class="n">' + n + '</span></button>';
-  };
-  return '<div class="fchips cofilter" role="group" aria-label="Show projects by company">' + chip(null, 'All', total) +
-    g.keys.map(function (k) { return chip(k, g.label[k], g.n[k], g.title[k]); }).join('') + '</div>';
+function pmKeyOf(p) { return keyOf(p.pm); }
+function pmGroups(list) {
+  var g = { keys: [], n: {}, label: {}, title: {} };
+  list.forEach(function (p) {
+    var k = pmKeyOf(p);
+    if (!has(g.n, k)) { g.n[k] = 0; g.keys.push(k); g.label[k] = k ? p.pm : 'No PM'; g.title[k] = k ? '' : 'Projects with no PM set'; }
+    g.n[k]++;
+  });
+  g.keys.sort(function (a, b) { return !a - !b || cmpNat(g.label[a], g.label[b]); });   // names A to Z, "No PM" last
+  return g;
 }
-function shownProjects() {
-  var all = state.data.projects.slice().sort(byName);
-  if (state.ui.coFilter === null) return all;
-  var f = all.filter(function (p) { return coKeyOf(p) === state.ui.coFilter; });
-  return f.length ? f : all;
+function byCompany(list) { var f = state.ui.coFilter; return f === null ? list : list.filter(function (p) { return coKeyOf(p) === f; }); }
+function byPm(list) { var f = state.ui.pmFilter; return f === null ? list : list.filter(function (p) { return pmKeyOf(p) === f; }); }
+/** One row of filter buttons. The counts are within the other row's choice, so a button that would show nothing is off. */
+function chipRow(kind, label, g, counts, total) {
+  var f = kind === 'co' ? state.ui.coFilter : state.ui.pmFilter;
+  var chip = function (k, text, n, title) {
+    var on = k === null ? f === null : f === k, co = kind === 'co' && k ? companyByKey(k) : null;
+    return '<button type="button" class="fchip" data-action="' + kind + '-filter" data-k="' + (k === null ? '*' : esc(k)) + '" aria-pressed="' + on + '"' +
+      (title ? ' title="' + esc(title) + '"' : '') + (!n && !on ? ' disabled' : '') + '>' +
+      (kind === 'co' && k !== null ? '<i class="cdot' + (co ? ' ' + co.key : '') + '"></i>' : '') + esc(text) + ' <span class="n">' + n + '</span></button>';
+  };
+  return '<div class="frow"><span class="flabel">' + label + '</span><div class="fchips" role="group" aria-label="Show projects by ' + (kind === 'co' ? 'company' : 'PM') + '">' +
+    chip(null, 'All', total) + g.keys.map(function (k) { return chip(k, g.label[k], counts[k] || 0, g.title[k]); }).join('') + '</div></div>';
+}
+function shownProjects() { return byPm(byCompany(state.data.projects.slice().sort(byName))); }
+function filterNote() {
+  var parts = [], all = state.data.projects;
+  if (state.ui.coFilter !== null) parts.push('Company: ' + coGroups(all).title[state.ui.coFilter]);
+  if (state.ui.pmFilter !== null) parts.push('PM: ' + pmGroups(all).label[state.ui.pmFilter]);
+  return parts.join(' · ');
 }
 function viewProjects() {
-  var d = state.data, all = d.projects.slice().sort(byName), g = coGroups(all), chips = '', list = all, scope = null;
-  if (g.keys.length > 1) {
-    if (state.ui.coFilter !== null && !has(g.n, state.ui.coFilter)) state.ui.coFilter = null;
-    chips = coChips(g, all.length);
-    if (state.ui.coFilter !== null) { scope = g.title[state.ui.coFilter]; list = all.filter(function (p) { return coKeyOf(p) === state.ui.coFilter; }); }
-  } else state.ui.coFilter = null;
+  var d = state.data, all = d.projects.slice().sort(byName), cg = coGroups(all), pg = pmGroups(all), chips = '';
+  var showCo = cg.keys.length > 1, showPm = pg.keys.length > 1;
+  if (!showCo || state.ui.coFilter !== null && !has(cg.n, state.ui.coFilter)) state.ui.coFilter = null;
+  if (!showPm || state.ui.pmFilter !== null && !has(pg.n, state.ui.pmFilter)) state.ui.pmFilter = null;
+  var list = byPm(byCompany(all));
+  if (showCo || showPm) {
+    var inPm = byPm(all), inCo = byCompany(all);
+    chips = '<div class="filters">' + (showCo ? chipRow('co', 'Company', cg, coGroups(inPm).n, inPm.length) : '') +
+      (showPm ? chipRow('pm', 'PM', pg, pmGroups(inCo).n, inCo.length) : '') + '</div>';
+  }
+  var scope = { co: state.ui.coFilter !== null ? cg.title[state.ui.coFilter] : '', pm: state.ui.pmFilter ? pg.label[state.ui.pmFilter] : '', noPm: state.ui.pmFilter === '' };
   var h = '<div class="stack">';
   var newBtn = canEdit() ? '<button type="button" class="btn primary" data-action="new-project">' + ICON.plus + 'New project</button>' : '';
   if (!all.length) {
@@ -1136,9 +1162,9 @@ function viewProjects() {
     h += chips + portfolioCard(open, scope) + attentionCard(open);
     var q = keyOf(state.ui.pSearch), groups = {};
     STATUS.forEach(function (st) { groups[st] = []; });
-    list.forEach(function (p) { if (!q || keyOf(p.name + ' ' + p.number + ' ' + p.gc + ' ' + p.estimator).indexOf(q) >= 0) groups[p.status].push(p); });
+    list.forEach(function (p) { if (!q || keyOf(p.name + ' ' + p.number + ' ' + p.gc + ' ' + p.estimator + ' ' + p.pm).indexOf(q) >= 0) groups[p.status].push(p); });
     var printBtn = PREVIEW ? '' : '<button type="button" class="btn" data-action="print-summary">' + ICON.print + 'Print summary</button>';
-    h += '<div class="toolbar ptools"><div class="grow">' + (all.length > 5 || q ? '<input class="search" id="pSearch" type="search" placeholder="Search by name, project number, GC or estimator" value="' + esc(state.ui.pSearch) + '" aria-label="Search projects">' : '') +
+    h += '<div class="toolbar ptools"><div class="grow">' + (all.length > 5 || q ? '<input class="search" id="pSearch" type="search" placeholder="Search by name, project number, GC, estimator or PM" value="' + esc(state.ui.pSearch) + '" aria-label="Search projects">' : '') +
       '</div><div class="btnrow">' + printBtn + newBtn + '</div></div>';
     var shown = 0;
     STATUS.forEach(function (st) {
@@ -1150,7 +1176,8 @@ function viewProjects() {
       if (st === 'Closed') h += '<details class="pmore pgroup" id="closedGroup"' + (state.ui.showClosed || q ? ' open' : '') + '><summary>' + head + '</summary>' + grid + '</details>';
       else h += '<section class="pgroup">' + head + grid + '</section>';
     });
-    if (!shown) h += '<p class="empty">No projects match "' + esc(state.ui.pSearch) + '".</p>';
+    if (!shown) h += list.length ? '<p class="empty">No projects match "' + esc(state.ui.pSearch) + '".</p>' :
+      '<p class="empty">No projects match these filters. <button type="button" class="btn ghost sm" data-action="clear-filters">Show all projects</button></p>';
   }
   var orphans = model().orphans;
   if (orphans.length) {
@@ -1163,7 +1190,7 @@ function viewProjects() {
 }
 function portfolioCard(open, scope) {
   var c = sumCounts(open), n = c.total;
-  var what = scope ? scope + ' ' + plural(open.length, 'project') : plural(open.length, 'project');
+  var what = (scope.co ? scope.co + ' ' : '') + plural(open.length, 'project') + (scope.noPm ? ' with no PM' : scope.pm ? ' with PM ' + scope.pm : '');
   var pct = n ? Math.round(c.cleared / n * 100) : 0;
   return '<section class="card" aria-labelledby="pfLbl"><div class="card-head"><div><h2 id="pfLbl">Open projects</h2><p>' +
     (open.length ? 'Every submittal in the ' + (open.length === 1 ? '' : open.length + ' ') + what + (open.length === 1 ? ' that is' : ' that are') + ' not closed.' : 'Every project is closed.') + '</p></div></div>' +
@@ -1216,6 +1243,7 @@ function projectCard(p) {
   } else h += '<span class="row"><span>No submittals yet</span></span>';
   var foot = [];
   if (p.estimator) foot.push('Estimator ' + esc(p.estimator));
+  if (p.pm) foot.push('PM ' + esc(p.pm));
   if (c.void) foot.push(c.void + ' void');
   if (c.other) foot.push('<span class="w">' + c.other + ' with no status</span>');
   if (waiting) foot.push('<span class="w">' + waiting + ' ' + plural(waiting, 'change') + ' waiting to save</span>');
@@ -1344,6 +1372,8 @@ function viewSettings(p) {
     fieldHtml({ prefix: 'p_', name: 'number', label: 'Project No.', value: p.number, disabled: !edit }) +
     fieldHtml({ prefix: 'p_', name: 'gc', label: 'GC / recipient', value: p.gc, list: gcs, disabled: !edit, help: 'Who the submittals go to.' }) +
     fieldHtml({ prefix: 'p_', name: 'estimator', label: 'Estimator', value: p.estimator, list: ests, disabled: !edit }) +
+    fieldHtml({ prefix: 'p_', name: 'pm', label: 'PM', value: p.pm, list: pmNames(), disabled: !edit || !pmOk(),
+      help: pmOk() ? 'Shown next to the estimator at the top of this project. The project list can show one PM\'s projects.' : PM_OLD }) +
     fieldHtml({ prefix: 'p_', name: 'company', label: 'Company', type: 'select', value: curCo ? curCo.name : p.company, options: coOpts, disabled: !edit, help: 'Sets the colors of this project\'s pages.' }) +
     fieldHtml({ prefix: 'p_', name: 'status', label: 'Status', type: 'select', value: p.status, options: STATUS.map(function (s) { return { value: s, label: statusLabel(s) }; }), disabled: !edit }) +
     fieldHtml({ prefix: 'p_', name: 'notes', label: 'Notes', type: 'textarea', value: p.notes, full: true, disabled: !edit }) +
@@ -1354,6 +1384,13 @@ function viewSettings(p) {
     '</form></section>';
   return h + appCard() + sheetCard() + '</div>';
 }
+/** PM suggestions: the PMs already on projects, and the team members whose title says project manager. */
+function pmNames() {
+  var team = state.data.lists.team, mgr = team.filter(function (t) { return /project manager|\bpm\b/i.test(t.title); });
+  return uniq(state.data.projects.map(function (p) { return p.pm; }).concat((mgr.length ? mgr : team).map(function (t) { return t.name; })));
+}
+var PM_OLD = 'Update the script in the Google Sheet first: the one it runs now would drop the PM.';
+function pmOk() { var v = state.server.version; return !v || verCmp(v, PM_SINCE) >= 0; }
 function uniq(a) { var s = {}, out = []; a.forEach(function (x) { x = str(x).trim(); if (x && !s[keyOf(x)]) { s[keyOf(x)] = 1; out.push(x); } }); return out.sort(cmpNat); }
 function appCard() {
   var edit = canEdit(), team = state.data.lists.team.map(function (t) { return t.name; });
@@ -1658,19 +1695,23 @@ function formHistory(hid, sid, kind) {
 function formNewProject() {
   var d = state.data, gcs = uniq(d.projects.map(function (x) { return x.gc; })), ests = uniq(d.lists.estimators.concat(d.projects.map(function (x) { return x.estimator; })));
   var co = state.ui.coFilter ? companyByKey(state.ui.coFilter) : null;
+  var pmPre = state.ui.pmFilter ? pmGroups(d.projects).label[state.ui.pmFilter] || '' : '';
   openModal({
     title: 'New project', submit: 'Add project',
     body: fieldHtml({ name: 'name', label: 'Project name', full: true }) +
       fieldHtml({ name: 'number', label: 'Project No.' }) +
       fieldHtml({ name: 'gc', label: 'GC / recipient', list: gcs }) +
       fieldHtml({ name: 'estimator', label: 'Estimator', list: ests }) +
+      fieldHtml({ name: 'pm', label: 'PM', value: pmOk() ? pmPre : '', list: pmNames(), disabled: !pmOk(), help: pmOk() ? '' : PM_OLD }) +
       fieldHtml({ name: 'company', label: 'Company', type: 'select', value: co ? co.name : '', options: [{ value: '', label: 'Not set' }].concat(COMPANIES.map(function (c) { return { value: c.name, label: c.name }; })) }),
     onSubmit: function (f) {
       var v = formValues(f);
       if (!v.name) return 'Enter the project name.';
       if (state.data.projects.some(function (p) { return keyOf(p.name) === keyOf(v.name); })) return 'There is already a project with that name.';
       var id = uid('p');
-      commit([add('projects', { id: id, name: v.name, number: v.number, gc: v.gc, estimator: v.estimator, company: v.company, status: 'Active', notes: '' })], 'Project added');
+      var row = { id: id, name: v.name, number: v.number, gc: v.gc, estimator: v.estimator, company: v.company, status: 'Active', notes: '' };
+      if (pmOk()) row.pm = v.pm;
+      commit([add('projects', row)], 'Project added');
       closeModal(true);
       go(hashOf({ view: 'project', pid: id, tab: 'log' }));
       return false;
@@ -1684,7 +1725,7 @@ function saveProject(f) {
   if (!v.name) { err.textContent = 'The project needs a name.'; return; }
   if (state.data.projects.some(function (x) { return x.id !== p.id && keyOf(x.name) === keyOf(v.name); })) { err.textContent = 'Another project has that name.'; return; }
   err.textContent = '';
-  ['name', 'number', 'gc', 'estimator', 'company', 'status', 'notes'].forEach(function (k) { if (str(v[k]) !== str(p[k])) patch[k] = v[k]; });
+  ['name', 'number', 'gc', 'estimator', 'pm', 'company', 'status', 'notes'].forEach(function (k) { if (str(v[k]) !== str(p[k])) patch[k] = v[k]; });
   if (patch.company !== undefined && companyOf(patch.company) && companyOf(patch.company) === companyOf(p.company)) delete patch.company;
   if (!Object.keys(patch).length) { toast('No changes to save'); return; }
   commit([upd('projects', p.id, patch)], 'Project saved');
@@ -1715,7 +1756,7 @@ function printLog(p) {
   var cnt = function (k, v) { return '<div><span>' + k + '</span><b>' + v + '</b></div>'; };
   var h = '<div class="ph"><div><div class="kick">Submittal log</div><h1>' + esc(p.name) + '</h1></div><div class="meta">' +
     (p.number ? '<b>Project No.</b> ' + esc(p.number) + '<br>' : '') + (p.gc ? '<b>Recipient / GC</b> ' + esc(p.gc) + '<br>' : '') +
-    (p.estimator ? '<b>Estimator</b> ' + esc(p.estimator) + '<br>' : '') + '<b>As of</b> ' + fmtUS(m.today) + '</div></div>' +
+    (p.estimator ? '<b>Estimator</b> ' + esc(p.estimator) + '<br>' : '') + (p.pm ? '<b>PM</b> ' + esc(p.pm) + '<br>' : '') + '<b>As of</b> ' + fmtUS(m.today) + '</div></div>' +
     '<div class="counts">' + cnt('Total', c.total) + cnt('Cleared', c.cleared) + cnt('Under review', c.review + (c.overdue ? ' (' + c.overdue + ' overdue)' : '')) + cnt('Revise &amp; resubmit', c.revise) + cnt('To send', c.send) +
     (c.void ? cnt('Void', c.void) : '') + '</div>';
   if (f || state.ui.q) h += '<p class="filt">Showing ' + list.length + ' of ' + c.total + (f ? ': ' + (f === 'overdue' ? 'Overdue' : groupLabel(f)) : '') + (state.ui.q ? ', matching "' + esc(state.ui.q) + '"' : '') + '.</p>';
@@ -1732,16 +1773,18 @@ function printLog(p) {
 }
 function printSummary() {
   var m = model(), list = shownProjects().filter(function (p) { return p.status !== 'Closed'; }), tot = blankCounts();
-  var h = '<div class="ph"><div><div class="kick">Submittal control</div><h1>All projects</h1></div><div class="meta"><b>As of</b> ' + fmtUS(m.today) + '<br>' + list.length + ' open ' + plural(list.length, 'project') + '</div></div>' +
+  var fn = filterNote();
+  var h = '<div class="ph"><div><div class="kick">Submittal control</div><h1>All projects</h1></div><div class="meta"><b>As of</b> ' + fmtUS(m.today) + '<br>' + list.length + ' open ' + plural(list.length, 'project') +
+    (fn ? '<br>' + esc(fn) : '') + '</div></div>' +
     '<table><thead><tr><th>Project Name</th><th>Project No.</th><th>GC / Recipient</th><th class="c">Total</th><th class="c">Cleared</th><th class="c">Under Review</th><th class="c">Overdue</th>' +
-    '<th class="c">Revise</th><th class="c">To Send</th><th>Estimator</th><th>Status</th></tr></thead><tbody>' +
+    '<th class="c">Revise</th><th class="c">To Send</th><th>Estimator</th><th>PM</th><th>Status</th></tr></thead><tbody>' +
     list.map(function (p) {
       var c = m.by[p.id].counts;
       Object.keys(tot).forEach(function (k) { tot[k] += c[k]; });
       return '<tr><td>' + esc(p.name) + '</td><td>' + esc(p.number) + '</td><td>' + esc(p.gc) + '</td><td class="n">' + c.total + '</td><td class="n">' + c.cleared + '</td><td class="n">' + c.review + '</td>' +
-        '<td class="n' + (c.overdue ? ' od' : '') + '">' + c.overdue + '</td><td class="n">' + c.revise + '</td><td class="n">' + c.send + '</td><td>' + esc(p.estimator) + '</td><td>' + esc(statusLabel(p.status)) + '</td></tr>';
+        '<td class="n' + (c.overdue ? ' od' : '') + '">' + c.overdue + '</td><td class="n">' + c.revise + '</td><td class="n">' + c.send + '</td><td>' + esc(p.estimator) + '</td><td>' + esc(p.pm) + '</td><td>' + esc(statusLabel(p.status)) + '</td></tr>';
     }).join('') +
-    '<tr class="tot"><td colspan="3">Total</td><td class="n">' + tot.total + '</td><td class="n">' + tot.cleared + '</td><td class="n">' + tot.review + '</td><td class="n">' + tot.overdue + '</td><td class="n">' + tot.revise + '</td><td class="n">' + tot.send + '</td><td colspan="2"></td></tr>' +
+    '<tr class="tot"><td colspan="3">Total</td><td class="n">' + tot.total + '</td><td class="n">' + tot.cleared + '</td><td class="n">' + tot.review + '</td><td class="n">' + tot.overdue + '</td><td class="n">' + tot.revise + '</td><td class="n">' + tot.send + '</td><td colspan="3"></td></tr>' +
     '</tbody></table><div class="foot">Overdue: under review ' + m.od + ' days or more. Closed projects are left out.</div>';
   printHtml(h);
 }
@@ -1878,7 +1921,12 @@ document.addEventListener('click', function (e) {
   else if (a === 'af') { state.ui.af = el.dataset.f; render(); }
   else if (a === 'attn') { state.ui.attn = el.dataset.v; state.ui.attnAll = false; saveUi(); render(); }
   else if (a === 'attn-all') { state.ui.attnAll = !state.ui.attnAll; render(); }
-  else if (a === 'co-filter') { var ck = el.dataset.co; state.ui.coFilter = ck === '*' || state.ui.coFilter === ck ? null : ck; render(); }
+  else if (a === 'co-filter' || a === 'pm-filter') {
+    var fk = a === 'co-filter' ? 'coFilter' : 'pmFilter', ck = el.dataset.k;
+    state.ui[fk] = ck === '*' || state.ui[fk] === ck ? null : ck;
+    render();
+  }
+  else if (a === 'clear-filters') { state.ui.coFilter = null; state.ui.pmFilter = null; render(); }
   else if (a === 'qa') quickFill(el);
   else if (a === 'log-hist') {
     if (formDirty()) { showFormErr('Save or cancel your changes to the submittal first.'); return; }
